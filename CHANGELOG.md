@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Fix CI "common dependencies" check failure by declaring `symfony/deprecation-contracts` and `symfony/polyfill-ctype` as `replace`d in composer.json, since GLPI core already provides them.
+
 ## [1.24.4] - 2026-08-06
 
 ### Fixed

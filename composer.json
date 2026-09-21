@@ -3,6 +3,10 @@
         "php": ">=8.2",
         "symfony/yaml": "^7.4"
     },
+    "replace": {
+        "symfony/deprecation-contracts": "*",
+        "symfony/polyfill-ctype": "*"
+    },
     "require-dev": {
         "glpi-project/tools": "^0.8.3"
     },

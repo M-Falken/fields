@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - Fix CI "common dependencies" check failure by declaring `symfony/deprecation-contracts` and `symfony/polyfill-ctype` as `replace`d in composer.json, since GLPI core already provides them.
 
+## [1.24.5] - 2026-09-11
+
+### Fixed
+
+- Fix administrators losing access to a block's configuration after setting a profile to "no access" on that block.
+- Fix additional fields being saved on an item the user is not allowed to update
+- Fix additional fields being displayed for an item the user is not allowed to read
+- Fix invalid characters being kept in the generated field name
+- Fix missing right checks on the target item when displaying or saving additional fields values
+
 ## [1.24.4] - 2026-08-06
 
 ### Fixed

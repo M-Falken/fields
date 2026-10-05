@@ -11,6 +11,7 @@
         "glpi-project/tools": "^0.8.3"
     },
     "config": {
+        "autoloader-suffix": "PluginFields",
         "optimize-autoloader": true,
         "platform": {
             "php": "8.2.99"

@@ -3,16 +3,13 @@
         "php": ">=8.2",
         "symfony/yaml": "^7.4"
     },
-    "replace": {
-        "symfony/deprecation-contracts": "*",
-        "symfony/polyfill-ctype": "*"
-    },
-    "require-dev": {
-        "glpi-project/tools": "^0.8.3"
+    "provide": {
+        "symfony/deprecation-contracts": "^3.0",
+        "symfony/polyfill-ctype": "^1.33"
     },
     "config": {
-        "autoloader-suffix": "PluginFields",
         "optimize-autoloader": true,
+        "autoloader-suffix": "PluginFields",
         "platform": {
             "php": "8.2.99"
         },

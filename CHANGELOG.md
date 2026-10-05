@@ -7,15 +7,37 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Display translated fields names in fields' tab
+
 ### Fixed
 
-- Fix CI "common dependencies" check failure by declaring `symfony/deprecation-contracts` and `symfony/polyfill-ctype` as `replace`d in composer.json, since GLPI core already provides them.
+- Fix value mapping between a multiple dropdown field and its destination in a form
+- Fix display width for rich text fields
+- Fix massive action update on CustomAssets
+- Fix mandatory fields on a Tab block not being enforced when updating an item.
+- Fix administrators losing access to a block's configuration after setting a profile to "no access" on that block.
+- Fix dependency conflict with GLPI core by no longer vendoring symfony/deprecation-contracts and symfony/polyfill-ctype.
+- Fix default field values not being applied when fields are empty on creation
+- Fix a field's default value not being applied to existing items and not being shown in search results for items with no dedicated row in the container table
+- Fix mandatory fields blocking automated item creation
+- Fix unclear mandatory field error when a GLPI form creating a ticket does not provide the field.
+- Fix blocks export, block deletion, read-only fields, item fields and form editor field selection not applying the expected checks.
+- Fix read-only status overrides being resolved from the previous status instead of the submitted one.
+- Fix read-only fields of an "Insertion in form" block being overwritable from the item form.
+- Fix a block's associated item types, type and tab being changeable after creation.
+- Remove obsolete FusionInventory integration.
+- CI: declare a unique composer autoloader suffix
+
+### Changed
+
+- A "GLPI item" field now rejects a new reference to an item the current user cannot read, instead of silently clearing it. Automated writes (CLI, cron, inventory) are not affected.
 
 ## [1.24.5] - 2026-09-11
 
 ### Fixed
 
-- Fix administrators losing access to a block's configuration after setting a profile to "no access" on that block.
 - Fix additional fields being saved on an item the user is not allowed to update
 - Fix additional fields being displayed for an item the user is not allowed to read
 - Fix invalid characters being kept in the generated field name

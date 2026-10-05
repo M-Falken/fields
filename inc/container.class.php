@@ -29,6 +29,7 @@
  */
 
 use Glpi\DBAL\QueryExpression;
+use Glpi\DBAL\QueryFunction;
 use Glpi\Features\Clonable;
 
 class PluginFieldsContainer extends CommonDBTM
@@ -256,12 +257,12 @@ class PluginFieldsContainer extends CommonDBTM
 
             foreach ($itemtypes as $itemtype) {
                 $sysname        = self::getSystemName($itemtype, $container['name']);
-                $class_filename = $sysname . '.class.php';
+                $class_filename = basename($sysname) . '.class.php';
                 if (file_exists(PLUGINFIELDS_DIR . ('/inc/' . $class_filename))) {
                     unlink(PLUGINFIELDS_DIR . ('/inc/' . $class_filename));
                 }
 
-                $injclass_filename = $sysname . 'injection.class.php';
+                $injclass_filename = basename($sysname) . 'injection.class.php';
                 if (file_exists(PLUGINFIELDS_DIR . ('/inc/' . $injclass_filename))) {
                     unlink(PLUGINFIELDS_DIR . ('/inc/' . $injclass_filename));
                 }
@@ -623,7 +624,31 @@ class PluginFieldsContainer extends CommonDBTM
             $input['label'] = PluginFieldsToolbox::sanitizeLabel((string) $input['label']);
         }
 
+        if (isset($input['itemtypes'])) {
+            $itemtypes = is_array($input['itemtypes'])
+                ? $input['itemtypes']
+                : PluginFieldsToolbox::decodeJSONItemtypes((string) $input['itemtypes']);
+            if (!is_array($itemtypes) || $itemtypes === [] || !$this->areValidItemtypeNames($itemtypes)) {
+                Session::AddMessageAfterRedirect(__('At least one selected object is not a valid element type', 'fields'), false, ERROR);
+
+                return false;
+            }
+
+            $input['itemtypes'] = json_encode(array_values($itemtypes));
+        }
+
         return $input;
+    }
+
+    private function areValidItemtypeNames(array $itemtypes): bool
+    {
+        foreach ($itemtypes as $itemtype) {
+            if (!is_string($itemtype) || preg_match('/^[A-Za-z_][A-Za-z0-9_\\\\]*$/', $itemtype) !== 1) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function prepareInputForAdd($input)
@@ -643,6 +668,12 @@ class PluginFieldsContainer extends CommonDBTM
 
         if (!is_array($input['itemtypes'])) {
             $input['itemtypes'] = [$input['itemtypes']];
+        }
+
+        if (!$this->areValidItemtypeNames($input['itemtypes'])) {
+            Session::AddMessageAfterRedirect(__('At least one selected object is not a valid element type', 'fields'), false, ERROR);
+
+            return false;
         }
 
         if ($input['type'] === 'dom') {
@@ -773,8 +804,8 @@ class PluginFieldsContainer extends CommonDBTM
         foreach ($itemtypes as $itemtype) {
             $sysname   = self::getSystemName($itemtype, $fields['name']);
             $classname = self::getClassname($itemtype, $fields['name']);
-            $class_filename = $sysname . '.class.php';
-            $injection_filename = $sysname . 'injection.class.php';
+            $class_filename = basename($sysname) . '.class.php';
+            $injection_filename = basename($sysname) . 'injection.class.php';
 
             // prevent usage of plugin class if not loaded
             if (!class_exists($itemtype)) {
@@ -853,8 +884,8 @@ class PluginFieldsContainer extends CommonDBTM
         foreach (PluginFieldsToolbox::decodeJSONItemtypes($this->fields['itemtypes']) as $itemtype) {
             $classname          = self::getClassname($itemtype, $this->fields['name']);
             $sysname            = self::getSystemName($itemtype, $this->fields['name']);
-            $class_filename     = $sysname . '.class.php';
-            $injection_filename = $sysname . 'injection.class.php';
+            $class_filename     = basename($sysname) . '.class.php';
+            $injection_filename = basename($sysname) . 'injection.class.php';
 
             //delete fields
             $field_obj = new PluginFieldsField();
@@ -1653,6 +1684,15 @@ HTML;
         }
     }
 
+    private static function isMandatoryCheckBypassed(array $data): bool
+    {
+        return isCommandLine()
+            || Session::isCron()
+            || isAPI()
+            || !empty($data['_auto_import'])
+            || !empty($data['is_dynamic']);
+    }
+
     /**
      * check data inserted
      * display a message when not ok
@@ -1660,10 +1700,11 @@ HTML;
      * @param array   $data          Data send by form
      * @param string  $itemtype      Item type
      * @param boolean $massiveaction ?
+     * @param boolean $is_creation   True when validating a new item with nothing submitted
      *
      * @return boolean
      */
-    public static function validateValues($data, $itemtype, $massiveaction)
+    public static function validateValues($data, $itemtype, $massiveaction, $is_creation = false)
     {
         /** @var DBmysql $DB */
         global $DB;
@@ -1672,6 +1713,7 @@ HTML;
         $empty_errors  = [];
         $number_errors = [];
         $url_errors = [];
+        $reference_errors = [];
 
         $container = new self();
         $container->getFromDB($data['plugin_fields_containers_id']);
@@ -1703,6 +1745,8 @@ HTML;
             }
         }
 
+        $stored_values = self::getStoredValues($container, $itemtype, (int) ($data['items_id'] ?? 0));
+
         foreach ($fields as $field) {
             if (!$field['is_active']) {
                 continue;
@@ -1719,13 +1763,19 @@ HTML;
                 $itemtype_key = sprintf('itemtype_%s', $name);
                 $items_id_key = sprintf('items_id_%s', $name);
 
-                if (
-                    isset($data[$itemtype_key], $data[$items_id_key])
-                    && is_a($data[$itemtype_key], CommonDBTM::class, true)
-                    && $data[$items_id_key] > 0
-                ) {
-                    $glpi_item = new $data[$itemtype_key]();
-                    $value     = $glpi_item->getFromDB($data[$items_id_key]) ? $data[$items_id_key] : null;
+                $is_unchanged_reference = isset($stored_values[$itemtype_key], $stored_values[$items_id_key], $data[$itemtype_key], $data[$items_id_key])
+                    && $stored_values[$itemtype_key] === $data[$itemtype_key]
+                    && (int) $stored_values[$items_id_key] === (int) $data[$items_id_key];
+                if (!$is_unchanged_reference && isset($data[$items_id_key]) && (int) $data[$items_id_key] > 0) {
+                    $value = self::isValidItemReference($field, $data[$itemtype_key] ?? null, (int) $data[$items_id_key])
+                        ? (int) $data[$items_id_key]
+                        : null;
+                    if ($value === null) {
+                        $field['itemtype']  = PluginFieldsField::getType();
+                        $reference_errors[] = PluginFieldsLabelTranslation::getLabelFor($field);
+                        $valid              = false;
+                        continue;
+                    }
                 }
             } elseif (isset($data[$name])) {
                 $value = $data[$name];
@@ -1739,13 +1789,14 @@ HTML;
             $field['itemtype'] = PluginFieldsField::getType();
             $field['label']    = PluginFieldsLabelTranslation::getLabelFor($field);
 
-            // Check mandatory fields
             if (
-                $field['mandatory'] == 1
+                !self::isMandatoryCheckBypassed($data)
+                && $field['mandatory'] == 1
                 && (
                     empty($value)
                     || (($field['type'] === 'dropdown' || preg_match('/^dropdown-.+/i', (string) $field['type'])) && $value == 0)
                     || (in_array($field['type'], ['date', 'datetime']) && $value == 'NULL')
+                    || ($field['multiple'] && is_string($value) && json_decode($value, true) === [])
                 )
             ) {
                 $empty_errors[] = $field['label'];
@@ -1765,6 +1816,13 @@ HTML;
         if ($empty_errors !== []) {
             Session::AddMessageAfterRedirect(__('Some mandatory fields are empty', 'fields')
                                           . ' : ' . implode(', ', $empty_errors), false, ERROR);
+            if ($is_creation) {
+                Session::AddMessageAfterRedirect(
+                    __('The form or source creating this item does not provide the mandatory fields above: map them to it, or make them optional.', 'fields'),
+                    false,
+                    ERROR,
+                );
+            }
         }
 
         if ($number_errors !== []) {
@@ -1777,7 +1835,133 @@ HTML;
                                           . ' : ' . implode(', ', $url_errors), false, ERROR);
         }
 
+        if ($reference_errors !== []) {
+            Session::AddMessageAfterRedirect(__('Some item fields reference an invalid item', 'fields')
+                                          . ' : ' . implode(', ', $reference_errors), false, ERROR);
+        }
+
         return $valid;
+    }
+
+    /**
+     * Status of the item for this request: the submitted one when present, otherwise the persisted one.
+     */
+    private static function getStatusValue(CommonDBTM $item): ?int
+    {
+        $status_field_name = PluginFieldsStatusOverride::getStatusFieldName($item->getType());
+        foreach ([$item->input, $item->fields] as $source) {
+            if (array_key_exists($status_field_name, $source) && $source[$status_field_name] !== '') {
+                return (int) $source[$status_field_name];
+            }
+        }
+
+        return null;
+    }
+
+    public static function removeReadonlyValues(array $data, CommonDBTM $item): array
+    {
+        $container_id = (int) $data['plugin_fields_containers_id'];
+        $fields       = (new PluginFieldsField())->find([
+            'plugin_fields_containers_id' => $container_id,
+            'is_active'                   => 1,
+        ]);
+
+        $status_value = self::getStatusValue($item);
+        $status_overrides = $status_value !== null
+            ? PluginFieldsStatusOverride::getOverridesForItemtypeAndStatus($container_id, $item->getType(), $status_value)
+            : [];
+        foreach ($status_overrides as $status_override) {
+            if (isset($fields[$status_override['plugin_fields_fields_id']])) {
+                $fields[$status_override['plugin_fields_fields_id']]['is_readonly'] = $status_override['is_readonly'];
+            }
+        }
+
+        $container = new self();
+        $container->getFromDB($container_id);
+
+        $stored_values = self::getStoredValues($container, $item->getType(), (int) $item->getID());
+
+        foreach ($fields as $field) {
+            if (!$field['is_readonly']) {
+                continue;
+            }
+
+            $dropdown_key = sprintf('plugin_fields_%sdropdowns_id', $field['name']);
+            unset($data[sprintf('_%s_defined', $field['name'])], $data[sprintf('_%s_defined', $dropdown_key)]);
+            foreach ([
+                $field['name'],
+                $dropdown_key,
+                sprintf('itemtype_%s', $field['name']),
+                sprintf('items_id_%s', $field['name']),
+            ] as $input_key) {
+                unset($data[$input_key]);
+                if (array_key_exists($input_key, $stored_values)) {
+                    $data[$input_key] = $field['multiple']
+                        ? json_decode((string) $stored_values[$input_key], true)
+                        : $stored_values[$input_key];
+                }
+            }
+
+            if ($item->isNewItem()) {
+                $data += self::getDefaultInput($field);
+            }
+        }
+
+        return $data;
+    }
+
+    private static function getDefaultInput(array $field): array
+    {
+        $default = PluginFieldsField::getDefaultValue($field);
+        if ($default === null) {
+            return [];
+        }
+
+        $input_key = $field['type'] === 'dropdown'
+            ? sprintf('plugin_fields_%sdropdowns_id', $field['name'])
+            : $field['name'];
+
+        if (!$field['multiple']) {
+            return [$input_key => $default];
+        }
+
+        $decoded = json_decode((string) $default, true);
+
+        return is_array($decoded) && $decoded !== [] ? [$input_key => $decoded] : [];
+    }
+
+    private static function getStoredValues(self $container, string $itemtype, int $items_id): array
+    {
+        if ($items_id <= 0 || $container->isNewItem()) {
+            return [];
+        }
+
+        $values_obj = (new DbUtils())->getItemForItemtype(self::getClassname($itemtype, $container->fields['name']));
+        if ($values_obj === false || !$values_obj->getFromDBByCrit(['items_id' => $items_id])) {
+            return [];
+        }
+
+        return $values_obj->fields;
+    }
+
+    private static function isValidItemReference(array $field, mixed $itemtype, int $items_id): bool
+    {
+        $allowed_itemtypes = json_decode((string) $field['allowed_values'], true);
+        if (
+            !is_string($itemtype)
+            || !is_a($itemtype, CommonDBTM::class, true)
+            || !is_array($allowed_itemtypes)
+            || !in_array($itemtype, $allowed_itemtypes, true)
+        ) {
+            return false;
+        }
+
+        $item = new $itemtype();
+
+        // Automated writes (CLI, cron, inventory) run without a user whose rights could be checked
+        return Session::getLoginUserID() === false || Session::isInventory()
+            ? $item->getFromDB($items_id)
+            : $item->can($items_id, READ);
     }
 
     public static function findContainer($itemtype, $type = 'tab', $subtype = '')
@@ -1920,87 +2104,143 @@ HTML;
      */
     public static function preItem(CommonDBTM $item)
     {
-        //find container (if not exist, do nothing)
+        //find container(s) (if none exist, do nothing)
         if (isset($item->input['c_id'])) {
-            $c_id = $item->input['c_id'];
+            $c_ids = [$item->input['c_id']];
         } elseif (isset($_REQUEST['c_id'])) {
-            $c_id = $_REQUEST['c_id'];
+            $c_ids = [$_REQUEST['c_id']];
+        } elseif (isset($_REQUEST['_plugin_fields_type'])) {
+            // an explicit context is targeted (e.g. a domtab's own subtab form)
+            $type    = $_REQUEST['_plugin_fields_type'];
+            $subtype = $type === 'domtab' ? $_REQUEST['_plugin_fields_subtype'] : '';
+            $c_id    = self::findContainer($item::class, $type, $subtype);
+            $c_ids   = $c_id === false ? [] : [$c_id];
         } else {
-            $type = 'dom';
-            if (isset($_REQUEST['_plugin_fields_type'])) {
-                $type = $_REQUEST['_plugin_fields_type'];
-            }
-
-            $subtype = '';
-            if ($type == 'domtab') {
-                $subtype = $_REQUEST['_plugin_fields_subtype'];
-            }
-
-            // tries for 'tab'
-            if (false === ($c_id = self::findContainer($item::class, $type, $subtype)) && false === $c_id = self::findContainer($item::class)) {
-                return false;
-            }
+            // generic add/update: both the "dom" and "tab" containers can carry
+            // mandatory fields that must be enforced, even though only "dom"
+            // fields are actually submitted inline with the main form
+            $c_ids = array_filter(
+                [self::findContainer($item::class, 'dom'), self::findContainer($item::class, 'tab')],
+                static fn($id) => $id !== false,
+            );
         }
 
-        $loc_c = new PluginFieldsContainer();
-        $loc_c->getFromDB($c_id);
-
-        // check rights on $c_id
-        // The profile check is only enforced when an active user profile is present in session.
-        // Automated contexts (cron jobs, API token sessions without profile) bypass the check
-        // so that plugin fields can still be persisted — authentication is already enforced
-        // at a higher level by the GLPI API/cron layer.
-        if (isset($_SESSION['glpiactiveprofile']['id']) && $_SESSION['glpiactiveprofile']['id'] != null && $c_id > 0) {
-            $right = PluginFieldsProfile::getRightOnContainer($_SESSION['glpiactiveprofile']['id'], $c_id);
-            if (($right > READ) === false) {
-                return false;
-            }
-        }
-
-
-        // need to check if container is usable on this object entity
-        $entities = [$loc_c->fields['entities_id']];
-        if ($loc_c->fields['is_recursive']) {
-            $entities = getSonsOf(getTableForItemType('Entity'), $loc_c->fields['entities_id']);
+        if ($c_ids === []) {
+            return false;
         }
 
         if (count($item->fields) === 0) {
             $item->fields = $item->input;
         }
 
-        if ($item->isEntityAssign() && !in_array($item->getEntityID(), $entities)) {
-            return false;
-        }
+        $submitted_data = null;
+        foreach ($c_ids as $c_id) {
+            $loc_c = new PluginFieldsContainer();
+            $loc_c->getFromDB($c_id);
 
-        if (false !== ($data = self::populateData($c_id, $item))) {
-            if (self::validateValues($data, $item::getType(), isset($_REQUEST['massiveaction'])) === false) {
+            // check rights on $c_id
+            // The profile check is only enforced when an active user profile is present in session.
+            // Automated contexts (cron jobs, API token sessions without profile) bypass the check
+            // so that plugin fields can still be persisted — authentication is already enforced
+            // at a higher level by the GLPI API/cron layer.
+            if (isset($_SESSION['glpiactiveprofile']['id']) && $_SESSION['glpiactiveprofile']['id'] != null && $c_id > 0) {
+                $right = PluginFieldsProfile::getRightOnContainer($_SESSION['glpiactiveprofile']['id'], $c_id);
+                if (($right > READ) === false) {
+                    continue;
+                }
+            }
+
+            // need to check if container is usable on this object entity
+            $entities = [$loc_c->fields['entities_id']];
+            if ($loc_c->fields['is_recursive']) {
+                $entities = getSonsOf(getTableForItemType('Entity'), $loc_c->fields['entities_id']);
+            }
+
+            if ($item->isEntityAssign() && !in_array($item->getEntityID(), $entities)) {
+                continue;
+            }
+
+            $result = self::checkContainerMandatory($item, $loc_c);
+            if ($result === false) {
                 $item->input = [];
 
                 return false;
             }
 
-            $item->input['_plugin_fields_data'] = $data;
+            if ($result !== []) {
+                $submitted_data = $result;
+            }
+        }
+
+        if ($submitted_data !== null) {
+            $item->input['_plugin_fields_data'] = $submitted_data;
 
             return true;
         }
 
-        //call validateValues() with a minimal data array to check for missing mandatory fields
-        //in case populateData() fails
-        if ($item->isNewItem() && $loc_c->fields['type'] === 'dom') {
-            $status_field_name = PluginFieldsStatusOverride::getStatusFieldName($item::getType());
-            $data = ['plugin_fields_containers_id' => $c_id];
-            if (array_key_exists($status_field_name, $item->input) && $item->input[$status_field_name] !== '') {
-                $data[$status_field_name] = (int) $item->input[$status_field_name];
-            } elseif (array_key_exists($status_field_name, $item->fields) && $item->fields[$status_field_name] !== '') {
-                $data[$status_field_name] = (int) $item->fields[$status_field_name];
-            }
+        return false;
+    }
+
+    /**
+     * Validate a single container's mandatory fields for the given item, using
+     * either the values submitted in this request or, if none were submitted
+     * for this container, the item's already persisted values.
+     *
+     * @return array|false The data to persist, an empty array if nothing was
+     *                      submitted but validation passed, or false if a
+     *                      mandatory field is missing (an error message has
+     *                      then been queued by validateValues()).
+     */
+    private static function checkContainerMandatory(CommonDBTM $item, PluginFieldsContainer $loc_c): array|false
+    {
+        $c_id = $loc_c->getID();
+
+        if (false !== ($data = self::populateData($c_id, $item))) {
+            // read-only fields keep their stored value, or their default on creation
+            $data = self::removeReadonlyValues($data, $item);
 
             if (self::validateValues($data, $item::getType(), isset($_REQUEST['massiveaction'])) === false) {
-                $item->input = [];
+                return false;
+            }
+
+            return $data;
+        }
+
+        //nothing submitted for this container in this request (e.g. untouched Tab)
+        //tab containers can't be filled before the item exists, so skip on creation
+        if ($item->isNewItem() && $loc_c->fields['type'] !== 'dom') {
+            return [];
+        }
+
+        $status_field_name = PluginFieldsStatusOverride::getStatusFieldName($item::getType());
+        $data = ['plugin_fields_containers_id' => $c_id];
+        if ($item->input['_auto_import'] ?? false) {
+            $data['_auto_import'] = true;
+        }
+
+        if (!empty($item->input['is_dynamic'])) {
+            $data['is_dynamic'] = true;
+        }
+
+        if (($status_value = self::getStatusValue($item)) !== null) {
+            $data[$status_field_name] = $status_value;
+        }
+
+        if (!$item->isNewItem()) {
+            // merge already persisted values to avoid false positives
+            $classname = self::getClassname($item::getType(), $loc_c->fields['name']);
+            $dbu       = new DbUtils();
+            $obj       = $dbu->getItemForItemtype($classname);
+            if ($obj !== false && $obj->getFromDBByCrit(['items_id' => $item->getID()])) {
+                $data += $obj->fields;
             }
         }
 
-        return false;
+        if (self::validateValues($data, $item::getType(), isset($_REQUEST['massiveaction']), $item->isNewItem()) === false) {
+            return false;
+        }
+
+        return [];
     }
 
     /**
@@ -2046,14 +2286,18 @@ HTML;
             $data['items_id'] = $item->getID();
         }
 
-        // Add status so it can be used with status overrides
-        $status_field_name        = PluginFieldsStatusOverride::getStatusFieldName($item->getType());
-        $data[$status_field_name] = null;
-        if (array_key_exists($status_field_name, $item->input) && $item->input[$status_field_name] !== '') {
-            $data[$status_field_name] = (int) $item->input[$status_field_name];
-        } elseif (array_key_exists($status_field_name, $item->fields) && $item->fields[$status_field_name] !== '') {
-            $data[$status_field_name] = (int) $item->fields[$status_field_name];
+        // Carry over the "automated import" markers so mandatory fields can be relaxed
+        // for items created without a human filling a form.
+        if (!empty($item->input['_auto_import'])) {
+            $data['_auto_import'] = true;
         }
+
+        if (!empty($item->input['is_dynamic'])) {
+            $data['is_dynamic'] = true;
+        }
+
+        // Add status so it can be used with status overrides
+        $data[PluginFieldsStatusOverride::getStatusFieldName($item->getType())] = self::getStatusValue($item);
 
         $has_fields = false;
         foreach ($fields as $field) {
@@ -2121,18 +2365,54 @@ HTML;
                             $data[$multiple_key] = $_POST[$multiple_key];
                             $has_fields          = true;
                         }
+                    } elseif ($item->isNewItem()) {
+                        $default = PluginFieldsField::getDefaultValue($field);
+                        $decoded = json_decode((string) $default, true);
+                        if (is_array($decoded) && $decoded !== []) {
+                            $data[$multiple_key] = $decoded;
+                            $has_fields          = true;
+                        }
                     }
                 }
 
                 //managed multi GLPI item dropdown field
                 if (preg_match('/^dropdown-(?<type>.+)$/', (string) $field['type'], $match) === 1) {
+                    $defined_key = '_' . $field['name'] . '_defined';
                     //values are defined by user
                     if (isset($item->input[$field['name']])) {
                         $data[$field['name']] = $item->input[$field['name']];
                         $has_fields           = true;
-                    } else { //multi dropdown is empty or has been emptied
+                    } elseif ($item->isNewItem()) {
+                        $default = PluginFieldsField::getDefaultValue($field);
+                        $decoded = json_decode((string) $default, true);
+                        if (is_array($decoded) && $decoded !== []) {
+                            $data[$field['name']] = $decoded;
+                            $has_fields           = true;
+                        } else {
+                            $data[$field['name']] = [];
+                        }
+                    } elseif (
+                        isset($item->input[$defined_key])
+                        && $item->input[$defined_key]
+                    ) { //multi dropdown is empty or has been emptied
                         $data[$field['name']] = [];
+                        $has_fields           = true;
+                    } elseif (
+                        isset($_REQUEST['massiveaction'])
+                        && isset($_POST[$field['name']])
+                    ) { // called from massiveaction
+                        $data[$field['name']] = $_POST[$field['name']];
+                        $has_fields           = true;
                     }
+                }
+            } elseif ($item->isNewItem()) {
+                $default = PluginFieldsField::getDefaultValue($field);
+                if ($default !== null) {
+                    $default_key = $field['type'] === 'dropdown'
+                        ? 'plugin_fields_' . $field['name'] . 'dropdowns_id'
+                        : $field['name'];
+                    $data[$default_key] = $default;
+                    $has_fields         = true;
                 }
             }
         }
@@ -2172,6 +2452,7 @@ HTML;
                 'glpi_plugin_fields_fields.is_readonly',
                 'glpi_plugin_fields_fields.allowed_values',
                 'glpi_plugin_fields_fields.multiple',
+                'glpi_plugin_fields_fields.default_value',
                 'glpi_plugin_fields_containers.id AS container_id',
                 'glpi_plugin_fields_containers.name AS container_name',
                 'glpi_plugin_fields_containers.label AS container_label',
@@ -2279,6 +2560,21 @@ HTML;
                     $opt[$i]['datatype'] = 'string';
             }
 
+            if (
+                (string) $data['default_value'] !== ''
+                && !in_array($data['type'], ['dropdown', 'glpi_item'], true)
+                && !preg_match('/^dropdown-.+$/i', (string) $data['type'])
+            ) {
+                $default_expression = in_array($data['type'], ['date', 'datetime'], true) && $data['default_value'] === 'now'
+                    ? QueryFunction::now()
+                    : new QueryExpression($DB::quoteValue($data['default_value']));
+
+                $opt[$i]['computation'] = QueryFunction::coalesce([
+                    'TABLE.' . $data['field_name'],
+                    $default_expression,
+                ]);
+            }
+
             $dropdown_matches = [];
             if ($data['type'] === 'dropdown') {
                 $field_name = 'plugin_fields_' . $data['field_name'] . 'dropdowns_id';
@@ -2299,6 +2595,8 @@ HTML;
                     $opt[$i]['joinparams']['jointype']                             = '';
                     $opt[$i]['joinparams']['beforejoin']['table']                  = $tablename;
                     $opt[$i]['joinparams']['beforejoin']['joinparams']['jointype'] = 'itemtype_item';
+
+                    self::addDropdownDefaultValueComputation($opt[$i], (string) $data['default_value']);
                 }
             } elseif (
                 preg_match('/^dropdown-(?<class>.+)$/i', (string) $data['type'], $dropdown_matches)
@@ -2321,6 +2619,8 @@ HTML;
                     $opt[$i]['joinparams']['jointype']                             = '';
                     $opt[$i]['joinparams']['beforejoin']['table']                  = $tablename;
                     $opt[$i]['joinparams']['beforejoin']['joinparams']['jointype'] = 'itemtype_item';
+
+                    self::addDropdownDefaultValueComputation($opt[$i], (string) $data['default_value']);
                 }
             } elseif ($data['type'] === 'glpi_item') {
                 $itemtype_field = sprintf('itemtype_%s', $data['field_name']);
@@ -2350,6 +2650,29 @@ HTML;
         }
 
         return $opt;
+    }
+
+    /**
+     * Add a computation to the search option for a dropdown field to use a default value if the field is null.
+     */
+    private static function addDropdownDefaultValueComputation(array &$searchoption, string $default_value): void
+    {
+        /** @var DBmysql $DB */
+        global $DB;
+
+        if ($default_value === '') {
+            return;
+        }
+
+        $default_name = Dropdown::getDropdownName($searchoption['table'], (int) $default_value);
+        if ($default_name === '') {
+            return;
+        }
+
+        $searchoption['computation'] = QueryFunction::coalesce([
+            'TABLE.' . $searchoption['field'],
+            new QueryExpression($DB::quoteValue($default_name)),
+        ]);
     }
 
     /**

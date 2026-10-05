@@ -705,7 +705,8 @@ class PluginFieldsField extends CommonDBChild
                     echo "<tr class='tab_bg_2' style='cursor:pointer'>";
 
                     echo '<td>';
-                    $label = empty($this->fields['label']) ? NOT_AVAILABLE : $this->fields['label'];
+                    $label = PluginFieldsLabelTranslation::getLabelFor(['itemtype' => self::class] + $data);
+                    $label = empty($label) ? NOT_AVAILABLE : htmlspecialchars($label);
                     echo "<a href='" . $CFG_GLPI['root_doc'] . sprintf("/plugins/fields/front/field.form.php?id=%d'>%s</a>", $this->getID(), $label);
                     echo '</td>';
                     echo '<td>' . $fields_type[$this->fields['type']] . '</td>';
@@ -1051,6 +1052,9 @@ class PluginFieldsField extends CommonDBChild
         //JS to trigger any change and check if container need to be display or not
         $ajax_url = $CFG_GLPI['root_doc'] . '/plugins/fields/ajax/container.php';
         $items_id = $item->isNewItem() ? 0 : $item->getID();
+        $js_itemtype = json_encode($item::getType(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+        $js_type     = json_encode($type, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
+        $js_subtype  = json_encode($subtype, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
         echo Html::scriptBlock(
             <<<JAVASCRIPT
             function refreshContainer() {
@@ -1083,10 +1087,10 @@ class PluginFieldsField extends CommonDBChild
                         data: {
                             action:   'get_fields_html',
                             id:       {$c_id},
-                            itemtype: '{$item::getType()}',
+                            itemtype: {$js_itemtype},
                             items_id: {$items_id},
-                            type:     '{$type}',
-                            subtype:  '{$subtype}',
+                            type:     {$js_type},
+                            subtype:  {$js_subtype},
                             input:    data
                         },
                         success: function(data) {
@@ -1155,6 +1159,32 @@ class PluginFieldsField extends CommonDBChild
             );
 JAVASCRIPT,
         );
+    }
+
+    /**
+     * Retrieves the default value of a field
+     *
+     * @return mixed
+     */
+    public static function getDefaultValue(array $field)
+    {
+        $value = null;
+
+        if (in_array($field['type'], ['dropdown', 'yesno']) && $field['default_value'] === '') {
+            $value = 0;
+        } elseif ($field['default_value'] !== '') {
+            $value = $field['default_value'];
+
+            // shortcut for date/datetime
+            if (
+                in_array($field['type'], ['date', 'datetime'])
+                && $value == 'now'
+            ) {
+                $value = $_SESSION['glpi_currenttime'];
+            }
+        }
+
+        return $value;
     }
 
     public static function prepareHtmlFields(
@@ -1308,19 +1338,7 @@ JAVASCRIPT,
 
             //get default value
             if ($value === null) {
-                if (in_array($field['type'], ['dropdown', 'yesno']) && $field['default_value'] === '') {
-                    $value = 0;
-                } elseif ($field['default_value'] !== '') {
-                    $value = $field['default_value'];
-
-                    // shortcut for date/datetime
-                    if (
-                        in_array($field['type'], ['date', 'datetime'])
-                        && $value == 'now'
-                    ) {
-                        $value = $_SESSION['glpi_currenttime'];
-                    }
-                }
+                $value = self::getDefaultValue($field);
             }
 
             if ($field['multiple'] && !is_array($value)) {
@@ -1374,6 +1392,14 @@ JAVASCRIPT,
             (string) $searchOption['linkfield'],
         );
 
+        // itemtype is stored in a JSON array, so entry is surrounded by double quotes
+        $search_string = json_encode($itemtype);
+        // Backslashes must be doubled in LIKE clause according to MySQL documentation
+        // But do not escape backslashes for namespaced itemtypes, as they are already escaped
+        if (!str_contains((string) $itemtype, '\\')) {
+            $search_string = str_replace('\\', '\\\\', $search_string);
+        }
+
         //find field
         $iterator = $DB->request([
             'SELECT' => [
@@ -1394,7 +1420,7 @@ JAVASCRIPT,
             ],
             'WHERE' => [
                 'fields.name'          => $cleaned_linkfield,
-                'containers.itemtypes' => ['LIKE', sprintf('%%%s%%', $itemtype)],
+                'containers.itemtypes' => ['LIKE', '%' . $DB->escape($search_string) . '%'],
             ],
         ]);
 
@@ -1485,6 +1511,67 @@ JAVASCRIPT,
         //Create label translation
         if (!isset($this->input['clone']) || !$this->input['clone']) {
             PluginFieldsLabelTranslation::createForItem($this);
+        }
+
+        $this->applyDefaultValueToExistingItems();
+    }
+
+    /**
+     * Fill existing items with the default value of this field if it is set.
+     */
+    private function applyDefaultValueToExistingItems(): void
+    {
+        /** @var DBmysql $DB */
+        global $DB;
+
+        if ($this->fields['type'] === 'header') {
+            return;
+        }
+
+        if ($this->fields['multiple']) {
+            $decoded = json_decode((string) $this->fields['default_value'], true);
+            if (!is_array($decoded) || $decoded === []) {
+                return;
+            }
+        } elseif ((string) $this->fields['default_value'] === '') {
+            return;
+        }
+
+        $value = self::getDefaultValue($this->fields);
+        if ($value === null) {
+            return;
+        }
+
+        $sql_fields = PluginFieldsMigration::getSQLFields(
+            $this->fields['name'],
+            $this->fields['type'],
+            ['multiple' => (bool) $this->fields['multiple']],
+        );
+
+        if (count($sql_fields) !== 1) {
+            return;
+        }
+
+        $column = array_key_first($sql_fields);
+
+        $container = new PluginFieldsContainer();
+        if (!$container->getFromDB($this->fields['plugin_fields_containers_id'])) {
+            return;
+        }
+
+        foreach (PluginFieldsToolbox::decodeJSONItemtypes($container->fields['itemtypes']) as $itemtype) {
+            if (!class_exists($itemtype)) {
+                continue;
+            }
+
+            $classname = PluginFieldsContainer::getClassname($itemtype, $container->fields['name']);
+            $table     = $classname::getTable();
+
+            if (!$DB->tableExists($table)) {
+                continue;
+            }
+
+            $DB->update($table, [$column => $value], [1]);
         }
     }
 

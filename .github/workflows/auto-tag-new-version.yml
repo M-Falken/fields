@@ -10,6 +10,7 @@ on:
 
 jobs:
   auto-tag-new-version:
+    if: github.repository == 'pluginsGLPI/fields'
     name: "Automatically tag new version"
     uses: "glpi-project/plugin-release-workflows/.github/workflows/auto-tag-new-version.yml@v1"
     secrets:

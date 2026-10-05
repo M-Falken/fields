@@ -7,6 +7,7 @@ on:
 
 jobs:
   push-on-transifex:
+    if: github.repository == 'pluginsGLPI/fields'
     name: "Push locales sources"
     uses: "glpi-project/plugin-translation-workflows/.github/workflows/transifex-push-sources.yml@v1"
     secrets:
